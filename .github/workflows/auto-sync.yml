@@ -1,0 +1,44 @@
+name: Auto Sync and Patch
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Every Sunday at midnight UTC
+  workflow_dispatch: # Allow manual triggering from the Actions tab
+
+permissions:
+  contents: write # Needed to push changes to the repository
+
+jobs:
+  sync-and-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/nehirakbass/anime-filler-checker.git
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Merge upstream main
+        run: |
+          git merge upstream/main -m "Auto-sync: Merge upstream main" -X theirs || echo "Merge had conflicts, but proceeding."
+
+      - name: Ensure MAINTENANCE_MODE is false
+        run: |
+          sed -i 's/const MAINTENANCE_MODE = true;/const MAINTENANCE_MODE = false;/g' stremio-addon/lib/addon.js
+
+      - name: Commit and push changes
+        run: |
+          git add stremio-addon/lib/addon.js
+          git diff --staged --quiet || git commit -m "Auto-patch: Keep MAINTENANCE_MODE disabled"
+          git push origin main
