@@ -32,7 +32,7 @@ const manifest = {
   resources: ["subtitles", "stream"],
   types: ["series"],
   catalogs: [],
-  idPrefixes: ["tt", "kitsu:"],
+  idPrefixes: ["tt", "kitsu:", "mal:"],
   config: [
     { key: "showCanon", type: "checkbox", title: "✅ CANON — Manga faithful, safe to watch", default: "checked" },
     { key: "showFiller", type: "checkbox", title: "⛔ FILLER — Not from the manga, safe to skip", default: "checked" },
@@ -88,10 +88,13 @@ const TYPE_EMOJI = {
 };
 
 // Cache TTLs
+const MAL_NAME_CACHE_TTL        = 1000 * 60 * 60 * 24 * 7; // 7 days
 const KITSU_NAME_CACHE_TTL      = 1000 * 60 * 60 * 24 * 7; // 7 days
 const CINEMETA_NAME_CACHE_TTL   = 1000 * 60 * 60 * 24 * 7; // 7 days
 const ABSOLUTE_EP_CACHE_TTL     = 1000 * 60 * 60 * 24 * 7; // 7 days
 
+// Cache for MAL anime names
+const malNameCache = new Map();
 // Cache for Kitsu anime names
 const kitsuNameCache = new Map();
 // Cache for Cinemeta series name lookups (IMDB IDs)
@@ -111,6 +114,39 @@ function cacheHit(label) {
 function cacheMiss(label) {
   cacheStats.misses++;
   console.log(`[CACHE MISS] ${label} (hits=${cacheStats.hits} misses=${cacheStats.misses})`);
+}
+
+async function resolveAnimeNameFromMal(malId) {
+  const cached = malNameCache.get(malId);
+  if (cached && Date.now() - cached.ts < MAL_NAME_CACHE_TTL) {
+    cacheHit(`mal:${malId}`);
+    return cached.name;
+  }
+  // KV layer
+  const kvKey = `afc:name:mal:${malId}`;
+  const kvName = await kvGet(kvKey);
+  if (kvName) {
+    cacheHit(`kv:mal:${malId}`);
+    malNameCache.set(malId, { name: kvName, ts: Date.now() });
+    return kvName;
+  }
+  cacheMiss(`mal:${malId}`);
+  try {
+    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}`);
+    if (res.ok) {
+      const json = await res.json();
+      const name =
+        json.data?.title_english ||
+        json.data?.title ||
+        null;
+      if (name) {
+        malNameCache.set(malId, { name, ts: Date.now() });
+        await kvSet(kvKey, name, 60 * 60 * 24 * 7);
+      }
+      return name;
+    }
+  } catch {}
+  return null;
 }
 
 async function resolveAnimeNameFromKitsu(kitsuId) {
@@ -147,6 +183,10 @@ async function resolveAnimeNameFromKitsu(kitsuId) {
 }
 
 async function resolveAnimeName(id) {
+  // MAL ID: "mal:12345"
+  if (id.startsWith("mal:")) {
+    return resolveAnimeNameFromMal(id.slice("mal:".length));
+  }
   // Kitsu ID: "kitsu:12345"
   if (id.startsWith("kitsu:")) {
     return resolveAnimeNameFromKitsu(id.slice("kitsu:".length));
@@ -215,7 +255,7 @@ function parseEpisodeFromVideoId(videoId) {
  * "kitsu:12345:1" -> "kitsu:12345"
  */
 function getSeriesId(videoId) {
-  if (videoId.startsWith("kitsu:")) {
+  if (videoId.startsWith("kitsu:") || videoId.startsWith("mal:")) {
     const parts = videoId.split(":");
     return `${parts[0]}:${parts[1]}`;
   }
@@ -230,8 +270,8 @@ const absoluteEpCache = new Map();
  * Cinemeta returns all videos sorted by season/episode; we count the position.
  */
 async function resolveAbsoluteEpisode(seriesId, season, episode) {
-  // Kitsu uses absolute episode numbers directly
-  if (seriesId.startsWith("kitsu:")) return episode;
+  // Kitsu and MAL use absolute episode numbers directly
+  if (seriesId.startsWith("kitsu:") || seriesId.startsWith("mal:")) return episode;
 
   const cacheKey = seriesId;
   const cachedEntry = absoluteEpCache.get(cacheKey);
